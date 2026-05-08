@@ -6,7 +6,7 @@ from datetime import datetime
 
 # --- SETTINGS & UI CONFIG ---
 st.set_page_config(page_title="Disfluency Analyzer", layout="wide")
-st.title("🗣️ Speech Disfluency Analyzer (v1.3)")
+st.title("🗣️ Speech Disfluency Analyzer (v1.4)")
 
 # --- HELPERS ---
 def get_seconds(time_str):
@@ -27,26 +27,34 @@ def clean_transcript_clutter(text, exclude_phrases):
     text = re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '', text)
     text = re.sub(r'^[A-Za-z\s\d]+:', '', text, flags=re.MULTILINE)
     
-    # 2. Remove User-Specified "Protocol Phrases" (e.g., countdowns)
+    # 2. Remove User-Specified "Protocol Phrases" (Countdowns, etc.)
     for phrase in exclude_phrases:
-        if phrase.strip():
-            # Create a flexible regex that ignores punctuation differences in the phrase
-            pattern = re.escape(phrase.strip())
-            pattern = pattern.replace(r'\,', r'[\,]*').replace(r'\ ', r'\s+')
-            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+        p_clean = phrase.strip()
+        if p_clean:
+            # Create regex that is flexible with spaces and punctuation
+            pattern = re.escape(p_clean).replace(r'\ ', r'\s+')
+            # This will remove the phrase and any immediate following punctuation/space
+            text = re.sub(pattern + r'[\s,.]*', '', text, flags=re.IGNORECASE)
             
-    return " ".join(text.split())
+    # 3. Final polish to remove double spaces or leading/trailing commas
+    text = re.sub(r'\s+', ' ', text)
+    text = re.sub(r'^[\s,.]+|[\s,.]+$', '', text)
+    return text.strip()
 
 # --- 1. SIDEBAR: CONFIGURATION ---
 st.sidebar.header("1. Configure Analysis")
 n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm, erm, hmm, eh, huh", height=80)
 l_input = st.sidebar.text_area("Lexical (L)", value="like, you know, so, therefore, I mean", height=80)
-# NEW: Exclusion List
-ex_input = st.sidebar.text_area("Phrases to Exclude (e.g. 'three, two, one')", value="three, two, one, starting in three, starting now", height=100)
+
+st.sidebar.markdown("---")
+st.sidebar.subheader("Protocol Exclusion")
+# UPDATED: Now uses New Lines so you can include commas in your phrases
+ex_input = st.sidebar.text_area("Phrases to Exclude (One per line):", 
+                                value="Alright, I'll be starting in three, two, one\nstarting in 3, 2, 1\nstarting now", height=120)
 
 n_list = [w.strip().lower() for w in n_input.split(",")]
 l_list = [w.strip().lower() for w in l_input.split(",")]
-exclude_list = [p.strip() for p in ex_input.split(",")]
+exclude_list = [p.strip() for p in ex_input.split("\n") if p.strip()]
 
 # --- 2. VISIT METADATA ---
 st.header("2. Visit & Session Information")
@@ -150,8 +158,8 @@ if raw_transcript:
                 
                 st.markdown("### 📊 Session Summary")
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Disfluencies per Minute", f"{total_dis/dur_m:.2f}" if dur_m > 0 else "0")
-                m2.metric("Disfluencies per 100 Words", f"{(total_dis/func_words)*100:.2f}" if func_words > 0 else "0")
+                m1.metric("Dis_per_Min", f"{total_dis/dur_m:.2f}" if dur_m > 0 else "0")
+                m2.metric("Dis_per_100_Words", f"{(total_dis/func_words)*100:.2f}" if func_words > 0 else "0")
                 m3.metric("Functional Words", func_words)
                 m4.metric("Duration (min)", f"{dur_m:.2f}")
 
