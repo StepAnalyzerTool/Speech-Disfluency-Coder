@@ -6,7 +6,7 @@ from datetime import datetime
 
 # --- SETTINGS & UI CONFIG ---
 st.set_page_config(page_title="Disfluency Analyzer", layout="wide")
-st.title("🗣️ Speech Disfluency Analyzer (v1.4)")
+st.title("🗣️ Speech Disfluency Analyzer (v1.5)")
 
 # --- HELPERS ---
 def get_seconds(time_str):
@@ -21,25 +21,32 @@ def extract_timestamp(line):
     match = re.search(r'(\d{1,2}:\d{2}:\d{2})|(\d{1,2}:\d{2})', line)
     return get_seconds(match.group(0)) if match else None
 
-def clean_transcript_clutter(text, exclude_phrases):
-    # 1. Remove VTT markers and standalone timestamps
+def clean_transcript_clutter(text, markers, general_exclusions):
+    # 1. Remove VTT markers and timestamps
     text = re.sub(r'\d{1,2}:\d{2}:\d{2}\.\d{3} --> \d{1,2}:\d{2}:\d{2}\.\d{3}', '', text)
     text = re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '', text)
     text = re.sub(r'^[A-Za-z\s\d]+:', '', text, flags=re.MULTILINE)
     
-    # 2. Remove User-Specified "Protocol Phrases" (Countdowns, etc.)
-    for phrase in exclude_phrases:
+    # 2. START MARKER LOGIC: Delete everything before and including the marker
+    for m in markers:
+        m_clean = m.strip()
+        if m_clean:
+            # Flexible regex for digits/words (e.g. "one" or "1")
+            pattern = rf'\b{re.escape(m_clean)}\b'
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match and match.start() < 150: # Only nukes if found at the beginning
+                text = text[match.end():]
+                break # Only process the first marker found
+
+    # 3. GENERAL EXCLUSIONS (Mid-speech phrases)
+    for phrase in general_exclusions:
         p_clean = phrase.strip()
         if p_clean:
-            # Create regex that is flexible with spaces and punctuation
             pattern = re.escape(p_clean).replace(r'\ ', r'\s+')
-            # This will remove the phrase and any immediate following punctuation/space
             text = re.sub(pattern + r'[\s,.]*', '', text, flags=re.IGNORECASE)
             
-    # 3. Final polish to remove double spaces or leading/trailing commas
     text = re.sub(r'\s+', ' ', text)
-    text = re.sub(r'^[\s,.]+|[\s,.]+$', '', text)
-    return text.strip()
+    return text.strip(",. ")
 
 # --- 1. SIDEBAR: CONFIGURATION ---
 st.sidebar.header("1. Configure Analysis")
@@ -47,13 +54,16 @@ n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm,
 l_input = st.sidebar.text_area("Lexical (L)", value="like, you know, so, therefore, I mean", height=80)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Protocol Exclusion")
-# UPDATED: Now uses New Lines so you can include commas in your phrases
-ex_input = st.sidebar.text_area("Phrases to Exclude (One per line):", 
-                                value="Alright, I'll be starting in three, two, one\nstarting in 3, 2, 1\nstarting now", height=120)
+st.sidebar.subheader("Protocol Cleaning")
+# NEW: Specifically for the "one" in "3, 2, 1"
+marker_input = st.sidebar.text_area("Speech Start Markers (e.g. 'one'):", 
+                                    value="one, 1, start, beginning", height=100)
+ex_input = st.sidebar.text_area("Other Exclusions (One per line):", 
+                                value="thank you for listening\nend of session", height=80)
 
 n_list = [w.strip().lower() for w in n_input.split(",")]
 l_list = [w.strip().lower() for w in l_input.split(",")]
+markers = [m.strip() for m in marker_input.split(",") if m.strip()]
 exclude_list = [p.strip() for p in ex_input.split("\n") if p.strip()]
 
 # --- 2. VISIT METADATA ---
@@ -90,8 +100,8 @@ def is_filler_heuristic(target, prev, nxt):
         if n in ["to", "a", "an", "the"]: return False
     return True
 
-def analyze_segment(text_block, n_list, l_list, exclude_list):
-    clean_text = clean_transcript_clutter(text_block, exclude_list)
+def analyze_segment(text_block, n_list, l_list, markers, exclude_list):
+    clean_text = clean_transcript_clutter(text_block, markers, exclude_list)
     words = clean_text.split()
     findings = []
     flagged_indices = []
@@ -140,7 +150,7 @@ if raw_transcript:
             
             seg_text = " ".join(seg_lines)
             if seg_text.strip():
-                findings, words, highlight = analyze_segment(seg_text, n_list, l_list, exclude_list)
+                findings, words, highlight = analyze_segment(seg_text, n_list, l_list, markers, exclude_list)
                 st.subheader("Visual Audit")
                 st.markdown(highlight)
                 st.divider()
@@ -166,7 +176,7 @@ if raw_transcript:
                 row = {"ID": participant_id, "Date": visit_date, "Speech_#": i+1, "Topic": cfg['name'], "Dur": round(dur_m, 2), "Func_Words": func_words, "Dis_per_Min": round(total_dis/dur_m, 2), "Dis_per_100": round((total_dis/func_words)*100, 2)}
                 for t in (n_list + l_list): row[f"Count_{t}"] = confirmed[confirmed["Word"] == t]["Word"].count()
                 report_data.append(row)
-            else: st.warning(f"No text found for {cfg['start']} to {cfg['end']}.")
+            else: st.warning(f"No text found.")
 
     if report_data:
         st.divider(); st.subheader("4. Final Report Preview")
