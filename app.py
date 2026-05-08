@@ -6,7 +6,7 @@ from datetime import datetime
 
 # --- SETTINGS & UI CONFIG ---
 st.set_page_config(page_title="Disfluency Analyzer", layout="wide")
-st.title("🗣️ Speech Disfluency Analyzer (v1.2)")
+st.title("🗣️ Speech Disfluency Analyzer (v1.3)")
 
 # --- HELPERS ---
 def get_seconds(time_str):
@@ -18,30 +18,37 @@ def get_seconds(time_str):
     except: return 0
 
 def extract_timestamp(line):
-    # Flexible match for HH:MM:SS or MM:SS (handles milliseconds like .278 too)
     match = re.search(r'(\d{1,2}:\d{2}:\d{2})|(\d{1,2}:\d{2})', line)
-    if match:
-        found = match.group(0)
-        return get_seconds(found)
-    return None
+    return get_seconds(match.group(0)) if match else None
 
-def clean_transcript_clutter(text):
-    # Removes VTT markers like "00:28:34.278 --> 00:28:38.278"
+def clean_transcript_clutter(text, exclude_phrases):
+    # 1. Remove VTT markers and standalone timestamps
     text = re.sub(r'\d{1,2}:\d{2}:\d{2}\.\d{3} --> \d{1,2}:\d{2}:\d{2}\.\d{3}', '', text)
-    # Removes standalone timestamps
     text = re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '', text)
-    # Remove Speaker labels (e.g., "Speaker 1:")
     text = re.sub(r'^[A-Za-z\s\d]+:', '', text, flags=re.MULTILINE)
+    
+    # 2. Remove User-Specified "Protocol Phrases" (e.g., countdowns)
+    for phrase in exclude_phrases:
+        if phrase.strip():
+            # Create a flexible regex that ignores punctuation differences in the phrase
+            pattern = re.escape(phrase.strip())
+            pattern = pattern.replace(r'\,', r'[\,]*').replace(r'\ ', r'\s+')
+            text = re.sub(pattern, '', text, flags=re.IGNORECASE)
+            
     return " ".join(text.split())
 
-# --- 1. SIDEBAR ---
-st.sidebar.header("1. Configure Word Lists")
-n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm, erm, hmm, eh, huh", height=100)
-l_input = st.sidebar.text_area("Lexical (L)", value="like, you know, so, therefore, I mean", height=100)
+# --- 1. SIDEBAR: CONFIGURATION ---
+st.sidebar.header("1. Configure Analysis")
+n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm, erm, hmm, eh, huh", height=80)
+l_input = st.sidebar.text_area("Lexical (L)", value="like, you know, so, therefore, I mean", height=80)
+# NEW: Exclusion List
+ex_input = st.sidebar.text_area("Phrases to Exclude (e.g. 'three, two, one')", value="three, two, one, starting in three, starting now", height=100)
+
 n_list = [w.strip().lower() for w in n_input.split(",")]
 l_list = [w.strip().lower() for w in l_input.split(",")]
+exclude_list = [p.strip() for p in ex_input.split(",")]
 
-# --- 2. METADATA ---
+# --- 2. VISIT METADATA ---
 st.header("2. Visit & Session Information")
 c1, c2, c3 = st.columns(3)
 with c1: participant_id = st.text_input("Participant ID", value="P001")
@@ -61,7 +68,7 @@ for i in range(int(num_sessions)):
 
 raw_transcript = st.text_area("3. Paste Transcript Here:", height=200)
 
-# --- 3. ANALYSIS LOGIC ---
+# --- 3. ANALYSIS ENGINE ---
 def is_filler_heuristic(target, prev, nxt):
     target = target.lower()
     p = re.sub(r'[^\w]', '', prev[-1].lower()) if prev else ""
@@ -75,8 +82,8 @@ def is_filler_heuristic(target, prev, nxt):
         if n in ["to", "a", "an", "the"]: return False
     return True
 
-def analyze_segment(text_block, n_list, l_list):
-    clean_text = clean_transcript_clutter(text_block)
+def analyze_segment(text_block, n_list, l_list, exclude_list):
+    clean_text = clean_transcript_clutter(text_block, exclude_list)
     words = clean_text.split()
     findings = []
     flagged_indices = []
@@ -89,7 +96,6 @@ def analyze_segment(text_block, n_list, l_list):
             word_idx = len(clean_text[:m.start()].split())
             p_ctx = words[max(0, word_idx-1):word_idx]
             n_ctx = words[word_idx+len(target.split()):word_idx+len(target.split())+1]
-            
             if is_filler_heuristic(target, p_ctx, n_ctx) or target in n_list:
                 flagged_indices.extend(range(m.start(), m.end()))
                 findings.append({
@@ -105,7 +111,7 @@ def analyze_segment(text_block, n_list, l_list):
         highlighted = highlighted[:f['start']] + f"**[{original}]**" + highlighted[f['end']:]
     return sorted(findings, key=lambda x: x['start']), words, highlighted
 
-# --- 4. DISPLAY TABS ---
+# --- 4. DISPLAY ---
 if raw_transcript:
     st.divider()
     report_data = []
@@ -116,29 +122,24 @@ if raw_transcript:
         with tab:
             cfg = sessions_config[i]
             start_s, end_s = get_seconds(cfg['start']), get_seconds(cfg['end'])
-            
-            # IMPROVED SLICING: Carry over the current time to text lines
             seg_lines = []
             current_time = -1
             for line in lines:
-                ts = extract_timestamp(line)
+                ts = extract_timestamp(line); 
                 if ts is not None: current_time = ts
-                if start_s <= current_time <= end_s:
-                    # Don't add lines that are ONLY timestamps to the word count
-                    if not re.match(r'^\d{2}:\d{2}:\d{2}', line.strip()):
-                        seg_lines.append(line)
+                if start_s <= current_time <= end_s and not re.match(r'^\d{2}:\d{2}:\d{2}', line.strip()):
+                    seg_lines.append(line)
             
             seg_text = " ".join(seg_lines)
             if seg_text.strip():
-                findings, words, highlighted_text = analyze_segment(seg_text, n_list, l_list)
-                
-                st.subheader("Visual Audit (Automated Flags)")
-                st.markdown(highlighted_text)
+                findings, words, highlight = analyze_segment(seg_text, n_list, l_list, exclude_list)
+                st.subheader("Visual Audit")
+                st.markdown(highlight)
                 st.divider()
                 
                 st.subheader(f"Verify Counts: {cfg['name']}")
-                df_findings = pd.DataFrame(findings) if findings else pd.DataFrame(columns=["Context", "Word", "Category", "Is Filler?"])
-                edited_df = st.data_editor(df_findings[["Context", "Word", "Category", "Is Filler?"]], key=f"edit_{i}", width=800)
+                df_f = pd.DataFrame(findings) if findings else pd.DataFrame(columns=["Context", "Word", "Category", "Is Filler?"])
+                edited_df = st.data_editor(df_f[["Context", "Word", "Category", "Is Filler?"]], key=f"edit_{i}", width=800)
                 
                 confirmed = edited_df[edited_df["Is Filler?"] == True]
                 total_n = confirmed[confirmed["Category"] == "Non-Lexical"]["Word"].count()
@@ -154,29 +155,16 @@ if raw_transcript:
                 m3.metric("Functional Words", func_words)
                 m4.metric("Duration (min)", f"{dur_m:.2f}")
 
-                row = {
-                    "Participant_ID": participant_id, "Date": visit_date, "Speech_#": i+1, "Topic": cfg['name'],
-                    "Duration_Min": round(dur_m, 2), "Total_Words_Functional": func_words,
-                    "Dis_per_Minute": round(total_dis/dur_m, 2) if dur_m > 0 else 0,
-                    "Dis_per_100_Words": round((total_dis/func_words)*100, 2) if func_words > 0 else 0,
-                }
-                for t in (n_list + l_list):
-                    row[f"Count_{t}"] = confirmed[confirmed["Word"] == t]["Word"].count()
+                row = {"ID": participant_id, "Date": visit_date, "Speech_#": i+1, "Topic": cfg['name'], "Dur": round(dur_m, 2), "Func_Words": func_words, "Dis_per_Min": round(total_dis/dur_m, 2), "Dis_per_100": round((total_dis/func_words)*100, 2)}
+                for t in (n_list + l_list): row[f"Count_{t}"] = confirmed[confirmed["Word"] == t]["Word"].count()
                 report_data.append(row)
-            else:
-                st.warning(f"No text found for the range {cfg['start']} to {cfg['end']}. Check that your start/end times match the transcript format.")
+            else: st.warning(f"No text found for {cfg['start']} to {cfg['end']}.")
 
-    # --- 5. EXPORT ---
     if report_data:
-        st.divider()
-        st.subheader("4. Final Report Preview")
-        final_df = pd.DataFrame(report_data)
-        st.dataframe(final_df)
-        
+        st.divider(); st.subheader("4. Final Report Preview")
+        final_df = pd.DataFrame(report_data); st.dataframe(final_df)
         try:
             buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine='openpyxl') as writer:
-                final_df.to_excel(writer, index=False)
+            with pd.ExcelWriter(buf, engine='openpyxl') as writer: final_df.to_excel(writer, index=False)
             st.download_button("📥 Download Excel Report", data=buf.getvalue(), file_name=f"Report_{participant_id}.xlsx")
-        except:
-            st.download_button("📥 Download CSV", data=final_df.to_csv(index=False).encode('utf-8'), file_name=f"Report_{participant_id}.csv")
+        except: st.download_button("📥 Download CSV", data=final_df.to_csv(index=False).encode('utf-8'), file_name=f"Report_{participant_id}.csv")
