@@ -6,7 +6,7 @@ from datetime import datetime
 
 # --- SETTINGS & UI CONFIG ---
 st.set_page_config(page_title="Disfluency Analyzer", layout="wide")
-st.title("🗣️ Speech Disfluency Analyzer (v1.5)")
+st.title("🗣️ Speech Disfluency Analyzer (v1.6)")
 
 # --- HELPERS ---
 def get_seconds(time_str):
@@ -27,37 +27,39 @@ def clean_transcript_clutter(text, markers, general_exclusions):
     text = re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '', text)
     text = re.sub(r'^[A-Za-z\s\d]+:', '', text, flags=re.MULTILINE)
     
-    # 2. START MARKER LOGIC: Delete everything before and including the marker
+    # 2. START MARKER LOGIC: Nuke everything before the start signal
     for m in markers:
         m_clean = m.strip()
         if m_clean:
-            # Flexible regex for digits/words (e.g. "one" or "1")
+            # Matches the marker as a whole word, even with trailing punctuation
             pattern = rf'\b{re.escape(m_clean)}\b'
             match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match and match.start() < 150: # Only nukes if found at the beginning
+            if match and match.start() < 250: # Increased range for longer intros
                 text = text[match.end():]
-                break # Only process the first marker found
+                break 
 
-    # 3. GENERAL EXCLUSIONS (Mid-speech phrases)
+    # 3. GENERAL EXCLUSIONS
     for phrase in general_exclusions:
         p_clean = phrase.strip()
         if p_clean:
             pattern = re.escape(p_clean).replace(r'\ ', r'\s+')
             text = re.sub(pattern + r'[\s,.]*', '', text, flags=re.IGNORECASE)
             
+    # Remove leading/trailing junk
     text = re.sub(r'\s+', ' ', text)
-    return text.strip(",. ")
+    text = text.strip(",. ")
+    return text
 
-# --- 1. SIDEBAR: CONFIGURATION ---
+# --- 1. SIDEBAR ---
 st.sidebar.header("1. Configure Analysis")
 n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm, erm, hmm, eh, huh", height=80)
 l_input = st.sidebar.text_area("Lexical (L)", value="like, you know, so, therefore, I mean", height=80)
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Protocol Cleaning")
-# NEW: Specifically for the "one" in "3, 2, 1"
-marker_input = st.sidebar.text_area("Speech Start Markers (e.g. 'one'):", 
-                                    value="one, 1, start, beginning", height=100)
+# UPDATED: Added digits and countdowns to the markers
+marker_input = st.sidebar.text_area("Speech Start Markers (Nukes everything before):", 
+                                    value="one, 1, 3 2 1, start, beginning", height=100)
 ex_input = st.sidebar.text_area("Other Exclusions (One per line):", 
                                 value="thank you for listening\nend of session", height=80)
 
@@ -91,10 +93,21 @@ def is_filler_heuristic(target, prev, nxt):
     target = target.lower()
     p = re.sub(r'[^\w]', '', prev[-1].lower()) if prev else ""
     n = re.sub(r'[^\w]', '', nxt[0].lower()) if nxt else ""
+    
     if target == "so":
+        # Ignore if preceded by linking verb
         if p in ["is", "was", "am", "are", "were", "be", "been"]: return False
-        if n in ["many", "much", "that", "far", "fast", "long", "as", "busy", "good"]: return False
-        if n.endswith('y') or n.endswith('ed'): return False
+        
+        # Intensifier targets (must be exactly these)
+        functional_so = ["many", "much", "that", "far", "fast", "long", "called"]
+        if n in functional_so: return False
+        
+        # Adjective suffix rule (ensure it's not "my" or "any")
+        if (n.endswith('y') or n.endswith('ed')) and len(n) > 3: return False
+        
+        # Functional phrase
+        if n == "as" and nxt[1:2] == ["to"]: return False
+        
     if target == "like":
         if p in ["i", "you", "he", "she", "it", "we", "they", "to"]: return False
         if n in ["to", "a", "an", "the"]: return False
