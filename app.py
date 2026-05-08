@@ -6,7 +6,7 @@ from datetime import datetime
 
 # --- SETTINGS & UI CONFIG ---
 st.set_page_config(page_title="Disfluency Analyzer", layout="wide")
-st.title("🗣️ Speech Disfluency Analyzer (v1.6)")
+st.title("🗣️ Speech Disfluency Analyzer (v1.7)")
 
 # --- HELPERS ---
 def get_seconds(time_str):
@@ -21,34 +21,22 @@ def extract_timestamp(line):
     match = re.search(r'(\d{1,2}:\d{2}:\d{2})|(\d{1,2}:\d{2})', line)
     return get_seconds(match.group(0)) if match else None
 
-def clean_transcript_clutter(text, markers, general_exclusions):
-    # 1. Remove VTT markers and timestamps
+def clean_transcript_clutter(text, exclusion_list):
+    # 1. Basic Cleaning (Timestamps and VTT markers)
     text = re.sub(r'\d{1,2}:\d{2}:\d{2}\.\d{3} --> \d{1,2}:\d{2}:\d{2}\.\d{3}', '', text)
     text = re.sub(r'\b\d{1,2}:\d{2}(:\d{2})?\b', '', text)
     text = re.sub(r'^[A-Za-z\s\d]+:', '', text, flags=re.MULTILINE)
     
-    # 2. START MARKER LOGIC: Nuke everything before the start signal
-    for m in markers:
-        m_clean = m.strip()
-        if m_clean:
-            # Matches the marker as a whole word, even with trailing punctuation
-            pattern = rf'\b{re.escape(m_clean)}\b'
-            match = re.search(pattern, text, flags=re.IGNORECASE)
-            if match and match.start() < 250: # Increased range for longer intros
-                text = text[match.end():]
-                break 
-
-    # 3. GENERAL EXCLUSIONS
-    for phrase in general_exclusions:
+    # 2. Universal Exclusions (Researcher talk, intros, countdowns)
+    for phrase in exclusion_list:
         p_clean = phrase.strip()
         if p_clean:
-            pattern = re.escape(p_clean).replace(r'\ ', r'\s+')
+            # Flexible regex: Escapes phrase and allows for varying punctuation/spaces
+            pattern = re.escape(p_clean).replace(r'\ ', r'\s+').replace(r'\,', r'[\s,.]*')
             text = re.sub(pattern + r'[\s,.]*', '', text, flags=re.IGNORECASE)
             
-    # Remove leading/trailing junk
     text = re.sub(r'\s+', ' ', text)
-    text = text.strip(",. ")
-    return text
+    return text.strip(",. ")
 
 # --- 1. SIDEBAR ---
 st.sidebar.header("1. Configure Analysis")
@@ -56,16 +44,13 @@ n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm,
 l_input = st.sidebar.text_area("Lexical (L)", value="like, you know, so, therefore, I mean", height=80)
 
 st.sidebar.markdown("---")
-st.sidebar.subheader("Protocol Cleaning")
-# UPDATED: Added digits and countdowns to the markers
-marker_input = st.sidebar.text_area("Speech Start Markers (Nukes everything before):", 
-                                    value="one, 1, 3 2 1, start, beginning", height=100)
-ex_input = st.sidebar.text_area("Other Exclusions (One per line):", 
-                                value="thank you for listening\nend of session", height=80)
+st.sidebar.subheader("2. Protocol Exclusions")
+st.sidebar.caption("Type any phrase spoken by researchers or protocol instructions to remove them from the analysis (one per line).")
+ex_input = st.sidebar.text_area("Words/Phrases to Exclude:", 
+                                value="Alright, I'll be starting in 3, 2, 1\nResearcher: Okay, you can begin\nThank you for listening", height=150)
 
 n_list = [w.strip().lower() for w in n_input.split(",")]
 l_list = [w.strip().lower() for w in l_input.split(",")]
-markers = [m.strip() for m in marker_input.split(",") if m.strip()]
 exclude_list = [p.strip() for p in ex_input.split("\n") if p.strip()]
 
 # --- 2. VISIT METADATA ---
@@ -93,28 +78,18 @@ def is_filler_heuristic(target, prev, nxt):
     target = target.lower()
     p = re.sub(r'[^\w]', '', prev[-1].lower()) if prev else ""
     n = re.sub(r'[^\w]', '', nxt[0].lower()) if nxt else ""
-    
     if target == "so":
-        # Ignore if preceded by linking verb
         if p in ["is", "was", "am", "are", "were", "be", "been"]: return False
-        
-        # Intensifier targets (must be exactly these)
         functional_so = ["many", "much", "that", "far", "fast", "long", "called"]
         if n in functional_so: return False
-        
-        # Adjective suffix rule (ensure it's not "my" or "any")
         if (n.endswith('y') or n.endswith('ed')) and len(n) > 3: return False
-        
-        # Functional phrase
-        if n == "as" and nxt[1:2] == ["to"]: return False
-        
     if target == "like":
         if p in ["i", "you", "he", "she", "it", "we", "they", "to"]: return False
         if n in ["to", "a", "an", "the"]: return False
     return True
 
-def analyze_segment(text_block, n_list, l_list, markers, exclude_list):
-    clean_text = clean_transcript_clutter(text_block, markers, exclude_list)
+def analyze_segment(text_block, n_list, l_list, exclude_list):
+    clean_text = clean_transcript_clutter(text_block, exclude_list)
     words = clean_text.split()
     findings = []
     flagged_indices = []
@@ -163,7 +138,7 @@ if raw_transcript:
             
             seg_text = " ".join(seg_lines)
             if seg_text.strip():
-                findings, words, highlight = analyze_segment(seg_text, n_list, l_list, markers, exclude_list)
+                findings, words, highlight = analyze_segment(seg_text, n_list, l_list, exclude_list)
                 st.subheader("Visual Audit")
                 st.markdown(highlight)
                 st.divider()
