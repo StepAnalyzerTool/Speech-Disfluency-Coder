@@ -3,6 +3,8 @@ import pandas as pd
 import re
 import io
 from datetime import datetime
+from docx import Document
+from docx.enum.text import WD_COLOR_INDEX
 
 # --- SETTINGS & UI CONFIG ---
 st.set_page_config(page_title="Disfluency Analyzer", layout="wide")
@@ -38,6 +40,32 @@ def clean_transcript_clutter(text, exclusion_list):
     text = re.sub(r'\s+', ' ', text)
     return text.strip(",. ")
 
+def build_reviewed_speech_docx(participant_id, visit_date, speech_results):
+    doc = Document()
+    doc.add_heading("Reviewed Speech Summary", 0)
+    doc.add_paragraph(f"Participant ID: {participant_id}")
+    doc.add_paragraph(f"Visit Date: {visit_date.strftime('%B %d, %Y')}")
+    doc.add_paragraph("Researcher-approved disfluencies are highlighted in yellow.")
+
+    for speech in speech_results:
+        doc.add_heading(speech["name"], level=1)
+        paragraph = doc.add_paragraph()
+        text = speech["text"]
+        cursor = 0
+        for finding in sorted(speech["approved_findings"], key=lambda item: item["start"]):
+            start, end = finding["start"], finding["end"]
+            if start < cursor:
+                continue
+            paragraph.add_run(text[cursor:start])
+            highlighted_run = paragraph.add_run(text[start:end])
+            highlighted_run.font.highlight_color = WD_COLOR_INDEX.YELLOW
+            cursor = end
+        paragraph.add_run(text[cursor:])
+
+    buffer = io.BytesIO()
+    doc.save(buffer)
+    return buffer.getvalue()
+
 # --- 1. SIDEBAR ---
 st.sidebar.header("1. Configure Analysis")
 n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm, erm, hmm, eh, huh", height=80)
@@ -54,7 +82,7 @@ l_list = [w.strip().lower() for w in l_input.split(",")]
 exclude_list = [p.strip() for p in ex_input.split("\n") if p.strip()]
 
 # --- 2. VISIT METADATA ---
-st.header("2. Visit & Session Information")
+st.header("Visit & Session Information")
 c1, c2, c3 = st.columns(3)
 with c1: participant_id = st.text_input("Participant ID", value="P001")
 with c2: visit_date = st.date_input("Visit Date", value=datetime.today())
@@ -121,6 +149,7 @@ def analyze_segment(text_block, n_list, l_list, exclude_list):
 if raw_transcript:
     st.divider()
     report_data = []
+    speech_results = []
     lines = raw_transcript.split('\n')
     tabs = st.tabs([s['name'] for s in sessions_config])
     
@@ -148,6 +177,15 @@ if raw_transcript:
                 edited_df = st.data_editor(df_f[["Context", "Word", "Category", "Is Filler?"]], key=f"edit_{i}", width=800)
                 
                 confirmed = edited_df[edited_df["Is Filler?"] == True]
+                approved_findings = [
+                    findings[idx] for idx in confirmed.index
+                    if isinstance(idx, int) and 0 <= idx < len(findings)
+                ]
+                speech_results.append({
+                    "name": cfg["name"],
+                    "text": clean_transcript_clutter(seg_text, exclude_list),
+                    "approved_findings": approved_findings,
+                })
                 total_n = confirmed[confirmed["Category"] == "Non-Lexical"]["Word"].count()
                 total_l = sum(confirmed[confirmed["Category"] == "Lexical"]["Word"].apply(lambda x: len(x.split())))
                 total_dis = total_n + total_l
@@ -173,4 +211,20 @@ if raw_transcript:
             buf = io.BytesIO()
             with pd.ExcelWriter(buf, engine='openpyxl') as writer: final_df.to_excel(writer, index=False)
             st.download_button("📥 Download Excel Report", data=buf.getvalue(), file_name=f"Report_{participant_id}.xlsx")
-        except: st.download_button("📥 Download CSV", data=final_df.to_csv(index=False).encode('utf-8'), file_name=f"Report_{participant_id}.csv")
+        except:
+            st.download_button("📥 Download CSV", data=final_df.to_csv(index=False).encode('utf-8'), file_name=f"Report_{participant_id}.csv")
+
+        st.markdown("### Reviewed Speech Summary")
+        if st.button("Generate Reviewed Speech Word Summary", type="primary"):
+            st.session_state["reviewed_speech_docx"] = build_reviewed_speech_docx(
+                participant_id, visit_date, speech_results
+            )
+
+        if "reviewed_speech_docx" in st.session_state:
+            safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", participant_id)
+            st.download_button(
+                "📄 Download Reviewed Speech (.docx)",
+                data=st.session_state["reviewed_speech_docx"],
+                file_name=f"Reviewed_Speech_{safe_id}.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            )
