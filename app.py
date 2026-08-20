@@ -40,10 +40,11 @@ def clean_transcript_clutter(text, exclusion_list):
     text = re.sub(r'\s+', ' ', text)
     return text.strip(",. ")
 
-def build_reviewed_speech_docx(participant_id, visit_date, speech_results):
+def build_reviewed_speech_docx(participant_id, observer_id, visit_date, speech_results):
     doc = Document()
     doc.add_heading("Reviewed Speech Summary", 0)
     doc.add_paragraph(f"Participant ID: {participant_id}")
+    doc.add_paragraph(f"Observer ID: {observer_id}")
     doc.add_paragraph(f"Visit Date: {visit_date.strftime('%B %d, %Y')}")
     doc.add_paragraph("Researcher-approved disfluencies are highlighted in yellow.")
 
@@ -66,6 +67,70 @@ def build_reviewed_speech_docx(participant_id, visit_date, speech_results):
     doc.save(buffer)
     return buffer.getvalue()
 
+def build_token_coding_rows(participant_id, observer_id, visit_date, speech_results):
+    rows = []
+    for speech in speech_results:
+        approved = sorted(speech["approved_findings"], key=lambda item: item["start"])
+        occurrence_ids = {
+            (finding["start"], finding["end"]): f"S{speech['speech_number']}-D{number:03d}"
+            for number, finding in enumerate(approved, start=1)
+        }
+        for token_position, match in enumerate(re.finditer(r"\S+", speech["text"]), start=1):
+            token_start, token_end = match.start(), match.end()
+            coded_finding = next(
+                (
+                    finding for finding in approved
+                    if token_start < finding["end"] and token_end > finding["start"]
+                ),
+                None,
+            )
+            rows.append({
+                "Participant_ID": participant_id,
+                "Observer_ID": observer_id,
+                "Visit_Date": visit_date,
+                "Speech_#": speech["speech_number"],
+                "Topic": speech["name"],
+                "Token_Position": token_position,
+                "Token_Text": match.group(0),
+                "Normalized_Token": re.sub(r"[^\w'-]", "", match.group(0)).lower(),
+                "Start_Char": token_start,
+                "End_Char": token_end,
+                "Is_Disfluency": coded_finding is not None,
+                "Disfluency_Category": coded_finding["Category"] if coded_finding else "",
+                "Coded_Phrase": speech["text"][coded_finding["start"]:coded_finding["end"]] if coded_finding else "",
+                "Occurrence_ID": occurrence_ids.get(
+                    (coded_finding["start"], coded_finding["end"]), ""
+                ) if coded_finding else "",
+            })
+    return rows
+
+
+def build_ioa_excel(report_data, speech_results, exclusion_list, n_list, l_list):
+    buffer = io.BytesIO()
+    coding_rows = build_token_coding_rows(
+        report_data[0]["ID"],
+        report_data[0]["Observer_ID"],
+        report_data[0]["Date"],
+        speech_results,
+    )
+    exclusions = pd.DataFrame({
+        "Exclusion_Order": range(1, len(exclusion_list) + 1),
+        "Exclusion_Phrase": exclusion_list,
+    })
+    settings = pd.DataFrame([
+        {"Category": "Non-Lexical", "Configured_Item": item} for item in n_list
+    ] + [
+        {"Category": "Lexical", "Configured_Item": item} for item in l_list
+    ])
+
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        pd.DataFrame(report_data).to_excel(writer, sheet_name="Summary", index=False)
+        pd.DataFrame(coding_rows).to_excel(writer, sheet_name="Token_Coding", index=False)
+        exclusions.to_excel(writer, sheet_name="Exclusions", index=False)
+        settings.to_excel(writer, sheet_name="Coding_Settings", index=False)
+    return buffer.getvalue()
+
+
 # --- 1. SIDEBAR ---
 st.sidebar.header("1. Configure Analysis")
 n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm, erm, hmm, eh, huh", height=80)
@@ -83,10 +148,11 @@ exclude_list = [p.strip() for p in ex_input.split("\n") if p.strip()]
 
 # --- 2. VISIT METADATA ---
 st.header("Visit & Session Information")
-c1, c2, c3 = st.columns(3)
+c1, c2, c3, c4 = st.columns(4)
 with c1: participant_id = st.text_input("Participant ID", value="P001")
-with c2: visit_date = st.date_input("Visit Date", value=datetime.today())
-with c3: num_sessions = st.number_input("Number of Speeches", min_value=1, value=1)
+with c2: observer_id = st.text_input("Observer ID", value="")
+with c3: visit_date = st.date_input("Visit Date", value=datetime.today())
+with c4: num_sessions = st.number_input("Number of Speeches", min_value=1, value=1)
 
 sessions_config = []
 st.subheader("Speech Timestamps")
@@ -174,7 +240,12 @@ if raw_transcript:
                 
                 st.subheader(f"Verify Counts: {cfg['name']}")
                 df_f = pd.DataFrame(findings) if findings else pd.DataFrame(columns=["Context", "Word", "Category", "Is Filler?"])
-                edited_df = st.data_editor(df_f[["Context", "Word", "Category", "Is Filler?"]], key=f"edit_{i}", width=800)
+                edited_df = st.data_editor(
+                    df_f[["Context", "Word", "Category", "Is Filler?"]],
+                    key=f"edit_{i}",
+                    width=800,
+                    disabled=["Context", "Word", "Category"],
+                )
                 
                 confirmed = edited_df[edited_df["Is Filler?"] == True]
                 approved_findings = [
@@ -182,6 +253,7 @@ if raw_transcript:
                     if isinstance(idx, int) and 0 <= idx < len(findings)
                 ]
                 speech_results.append({
+                    "speech_number": i + 1,
                     "name": cfg["name"],
                     "text": clean_transcript_clutter(seg_text, exclude_list),
                     "approved_findings": approved_findings,
@@ -199,7 +271,18 @@ if raw_transcript:
                 m3.metric("Functional Words", func_words)
                 m4.metric("Duration (min)", f"{dur_m:.2f}")
 
-                row = {"ID": participant_id, "Date": visit_date, "Speech_#": i+1, "Topic": cfg['name'], "Dur": round(dur_m, 2), "Func_Words": func_words, "Dis_per_Min": round(total_dis/dur_m, 2), "Dis_per_100": round((total_dis/func_words)*100, 2)}
+                row = {
+                    "ID": participant_id,
+                    "Observer_ID": observer_id,
+                    "Date": visit_date,
+                    "Speech_#": i + 1,
+                    "Topic": cfg["name"],
+                    "Dur": round(dur_m, 2),
+                    "Func_Words": func_words,
+                    "Dis_per_Min": round(total_dis / dur_m, 2) if dur_m > 0 else 0,
+                    "Dis_per_100": round((total_dis / func_words) * 100, 2) if func_words > 0 else 0,
+                    "Cleaned_Transcript": clean_transcript_clutter(seg_text, exclude_list),
+                }
                 for t in (n_list + l_list): row[f"Count_{t}"] = confirmed[confirmed["Word"] == t]["Word"].count()
                 report_data.append(row)
             else: st.warning(f"No text found.")
@@ -207,24 +290,33 @@ if raw_transcript:
     if report_data:
         st.divider(); st.subheader("4. Final Report Preview")
         final_df = pd.DataFrame(report_data); st.dataframe(final_df)
-        try:
-            buf = io.BytesIO()
-            with pd.ExcelWriter(buf, engine='openpyxl') as writer: final_df.to_excel(writer, index=False)
-            st.download_button("📥 Download Excel Report", data=buf.getvalue(), file_name=f"Report_{participant_id}.xlsx")
-        except:
-            st.download_button("📥 Download CSV", data=final_df.to_csv(index=False).encode('utf-8'), file_name=f"Report_{participant_id}.csv")
+        if not observer_id.strip():
+            st.warning("Enter an Observer ID before downloading the IOA-ready coding file.")
+        else:
+            ioa_excel = build_ioa_excel(
+                report_data, speech_results, exclude_list, n_list, l_list
+            )
+            safe_participant = re.sub(r"[^A-Za-z0-9_-]+", "_", participant_id)
+            safe_observer = re.sub(r"[^A-Za-z0-9_-]+", "_", observer_id)
+            st.download_button(
+                "📥 Download IOA-Ready Excel Report",
+                data=ioa_excel,
+                file_name=f"Coding_{safe_participant}_{safe_observer}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
 
         st.markdown("### Reviewed Speech Summary")
         if st.button("Generate Reviewed Speech Word Summary", type="primary"):
             st.session_state["reviewed_speech_docx"] = build_reviewed_speech_docx(
-                participant_id, visit_date, speech_results
+                participant_id, observer_id, visit_date, speech_results
             )
 
         if "reviewed_speech_docx" in st.session_state:
             safe_id = re.sub(r"[^A-Za-z0-9_-]+", "_", participant_id)
+            safe_observer = re.sub(r"[^A-Za-z0-9_-]+", "_", observer_id) or "Observer"
             st.download_button(
                 "📄 Download Reviewed Speech (.docx)",
                 data=st.session_state["reviewed_speech_docx"],
-                file_name=f"Reviewed_Speech_{safe_id}.docx",
+                file_name=f"Reviewed_Speech_{safe_id}_{safe_observer}.docx",
                 mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             )
