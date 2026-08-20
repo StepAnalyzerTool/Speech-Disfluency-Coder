@@ -3,6 +3,7 @@ import pandas as pd
 import re
 import io
 from datetime import datetime
+from difflib import SequenceMatcher
 from docx import Document
 from docx.enum.text import WD_COLOR_INDEX
 
@@ -131,7 +132,331 @@ def build_ioa_excel(report_data, speech_results, exclusion_list, n_list, l_list)
     return buffer.getvalue()
 
 
+# --- IOA CALCULATOR ---
+def read_ioa_workbook(uploaded_file):
+    sheets = pd.read_excel(uploaded_file, sheet_name=None)
+    required_sheets = {"Summary", "Token_Coding", "Exclusions", "Coding_Settings"}
+    missing = required_sheets - set(sheets)
+    if missing:
+        raise ValueError(
+            "Missing required sheet(s): " + ", ".join(sorted(missing))
+        )
+
+    summary = sheets["Summary"]
+    coding = sheets["Token_Coding"]
+    required_summary = {"ID", "Observer_ID", "Speech_#", "Topic"}
+    required_coding = {
+        "Participant_ID", "Observer_ID", "Speech_#", "Topic",
+        "Token_Position", "Token_Text", "Normalized_Token",
+        "Is_Disfluency", "Disfluency_Category",
+    }
+    if not required_summary.issubset(summary.columns):
+        raise ValueError("The Summary sheet does not match the IOA-ready export format.")
+    if not required_coding.issubset(coding.columns):
+        raise ValueError("The Token_Coding sheet does not match the IOA-ready export format.")
+
+    return {
+        "summary": summary,
+        "coding": coding,
+        "exclusions": sheets["Exclusions"],
+        "settings": sheets["Coding_Settings"],
+        "participant": str(summary.iloc[0]["ID"]),
+        "observer": str(summary.iloc[0]["Observer_ID"]),
+    }
+
+
+def cell_bool(value):
+    if pd.isna(value):
+        return False
+    if isinstance(value, str):
+        return value.strip().lower() in {"true", "yes", "1"}
+    return bool(value)
+
+
+def cell_text(value):
+    return "" if pd.isna(value) else str(value)
+
+
+def align_coding_rows(rows_a, rows_b):
+    records_a = rows_a.to_dict("records")
+    records_b = rows_b.to_dict("records")
+    tokens_a = [cell_text(row["Normalized_Token"]).lower() for row in records_a]
+    tokens_b = [cell_text(row["Normalized_Token"]).lower() for row in records_b]
+    matcher = SequenceMatcher(None, tokens_a, tokens_b, autojunk=False)
+    aligned = []
+
+    for tag, a1, a2, b1, b2 in matcher.get_opcodes():
+        if tag == "equal":
+            for offset in range(a2 - a1):
+                aligned.append((records_a[a1 + offset], records_b[b1 + offset], "match"))
+        elif tag == "delete":
+            for row_a in records_a[a1:a2]:
+                aligned.append((row_a, None, "only_a"))
+        elif tag == "insert":
+            for row_b in records_b[b1:b2]:
+                aligned.append((None, row_b, "only_b"))
+        else:
+            paired = min(a2 - a1, b2 - b1)
+            for offset in range(paired):
+                aligned.append((records_a[a1 + offset], records_b[b1 + offset], "different_word"))
+            for row_a in records_a[a1 + paired:a2]:
+                aligned.append((row_a, None, "only_a"))
+            for row_b in records_b[b1 + paired:b2]:
+                aligned.append((None, row_b, "only_b"))
+    return aligned
+
+
+def percent(numerator, denominator):
+    return round((numerator / denominator) * 100, 2) if denominator else 100.0
+
+
+def compare_speech(rows_a, rows_b, speech_number, topic, observer_a, observer_b):
+    aligned = align_coding_rows(rows_a, rows_b)
+    counts = {
+        "alignment_positions": len(aligned),
+        "matched_words": 0,
+        "only_a": 0,
+        "only_b": 0,
+        "decision_agreements": 0,
+        "both_disfluency": 0,
+        "either_disfluency": 0,
+        "both_coded": 0,
+        "category_agreements": 0,
+        "disfluency_a": int(rows_a["Is_Disfluency"].apply(cell_bool).sum()),
+        "disfluency_b": int(rows_b["Is_Disfluency"].apply(cell_bool).sum()),
+    }
+    discrepancies = []
+
+    for aligned_position, (row_a, row_b, alignment_type) in enumerate(aligned, start=1):
+        if alignment_type != "match":
+            if alignment_type == "only_a":
+                counts["only_a"] += 1
+                difference_type = f"Retained only by {observer_a}"
+            elif alignment_type == "only_b":
+                counts["only_b"] += 1
+                difference_type = f"Retained only by {observer_b}"
+            else:
+                difference_type = "Different retained word"
+
+            discrepancies.append({
+                "Speech_#": speech_number,
+                "Topic": topic,
+                "Aligned_Position": aligned_position,
+                "Difference_Type": difference_type,
+                f"{observer_a}_Position": row_a.get("Token_Position", "") if row_a else "",
+                f"{observer_a}_Token": row_a.get("Token_Text", "") if row_a else "",
+                f"{observer_a}_Disfluency": cell_bool(row_a.get("Is_Disfluency")) if row_a else "",
+                f"{observer_a}_Category": cell_text(row_a.get("Disfluency_Category")) if row_a else "",
+                f"{observer_b}_Position": row_b.get("Token_Position", "") if row_b else "",
+                f"{observer_b}_Token": row_b.get("Token_Text", "") if row_b else "",
+                f"{observer_b}_Disfluency": cell_bool(row_b.get("Is_Disfluency")) if row_b else "",
+                f"{observer_b}_Category": cell_text(row_b.get("Disfluency_Category")) if row_b else "",
+            })
+            continue
+
+        counts["matched_words"] += 1
+        coded_a = cell_bool(row_a["Is_Disfluency"])
+        coded_b = cell_bool(row_b["Is_Disfluency"])
+        category_a = cell_text(row_a["Disfluency_Category"])
+        category_b = cell_text(row_b["Disfluency_Category"])
+
+        if coded_a == coded_b:
+            counts["decision_agreements"] += 1
+        if coded_a or coded_b:
+            counts["either_disfluency"] += 1
+        if coded_a and coded_b:
+            counts["both_disfluency"] += 1
+            counts["both_coded"] += 1
+            if category_a == category_b:
+                counts["category_agreements"] += 1
+
+        if coded_a != coded_b or (coded_a and coded_b and category_a != category_b):
+            discrepancies.append({
+                "Speech_#": speech_number,
+                "Topic": topic,
+                "Aligned_Position": aligned_position,
+                "Difference_Type": "Disfluency coding" if coded_a != coded_b else "Category coding",
+                f"{observer_a}_Position": row_a["Token_Position"],
+                f"{observer_a}_Token": row_a["Token_Text"],
+                f"{observer_a}_Disfluency": coded_a,
+                f"{observer_a}_Category": category_a,
+                f"{observer_b}_Position": row_b["Token_Position"],
+                f"{observer_b}_Token": row_b["Token_Text"],
+                f"{observer_b}_Disfluency": coded_b,
+                f"{observer_b}_Category": category_b,
+            })
+
+    result = {
+        "Scope": f"Speech {speech_number}",
+        "Topic": topic,
+        "Retained_Text_Agreement_%": percent(counts["matched_words"], counts["alignment_positions"]),
+        "Disfluency_Decision_Agreement_%": percent(counts["decision_agreements"], counts["matched_words"]),
+        "Disfluency_Occurrence_Agreement_%": percent(counts["both_disfluency"], counts["either_disfluency"]),
+        "Category_Agreement_%": percent(counts["category_agreements"], counts["both_coded"]),
+        "Total_Count_Agreement_%": percent(
+            min(counts["disfluency_a"], counts["disfluency_b"]),
+            max(counts["disfluency_a"], counts["disfluency_b"]),
+        ),
+        f"{observer_a}_Retained_Words": len(rows_a),
+        f"{observer_b}_Retained_Words": len(rows_b),
+        f"{observer_a}_Disfluency_Words": counts["disfluency_a"],
+        f"{observer_b}_Disfluency_Words": counts["disfluency_b"],
+        "Text_Differences": counts["alignment_positions"] - counts["matched_words"],
+        "Coding_Differences": counts["matched_words"] - counts["decision_agreements"],
+    }
+    return result, discrepancies, counts
+
+
+def compare_ioa_workbooks(data_a, data_b):
+    if data_a["participant"] != data_b["participant"]:
+        raise ValueError(
+            f"Participant IDs do not match: {data_a['participant']} and {data_b['participant']}."
+        )
+
+    speeches_a = set(pd.to_numeric(data_a["coding"]["Speech_#"]).astype(int))
+    speeches_b = set(pd.to_numeric(data_b["coding"]["Speech_#"]).astype(int))
+    if speeches_a != speeches_b:
+        raise ValueError("The files do not contain the same speech numbers.")
+
+    observer_a, observer_b = data_a["observer"], data_b["observer"]
+    results, discrepancies, all_counts = [], [], []
+    for speech_number in sorted(speeches_a):
+        rows_a = data_a["coding"][
+            pd.to_numeric(data_a["coding"]["Speech_#"]).astype(int) == speech_number
+        ].reset_index(drop=True)
+        rows_b = data_b["coding"][
+            pd.to_numeric(data_b["coding"]["Speech_#"]).astype(int) == speech_number
+        ].reset_index(drop=True)
+        topic = cell_text(rows_a.iloc[0]["Topic"])
+        result, speech_discrepancies, counts = compare_speech(
+            rows_a, rows_b, speech_number, topic, observer_a, observer_b
+        )
+        results.append(result)
+        discrepancies.extend(speech_discrepancies)
+        all_counts.append(counts)
+
+    total = {
+        key: sum(item[key] for item in all_counts)
+        for key in all_counts[0]
+    }
+    overall = {
+        "Scope": "Overall",
+        "Topic": "All speeches",
+        "Retained_Text_Agreement_%": percent(total["matched_words"], total["alignment_positions"]),
+        "Disfluency_Decision_Agreement_%": percent(total["decision_agreements"], total["matched_words"]),
+        "Disfluency_Occurrence_Agreement_%": percent(total["both_disfluency"], total["either_disfluency"]),
+        "Category_Agreement_%": percent(total["category_agreements"], total["both_coded"]),
+        "Total_Count_Agreement_%": percent(
+            min(total["disfluency_a"], total["disfluency_b"]),
+            max(total["disfluency_a"], total["disfluency_b"]),
+        ),
+        f"{observer_a}_Retained_Words": sum(len(data_a["coding"][
+            pd.to_numeric(data_a["coding"]["Speech_#"]).astype(int) == speech
+        ]) for speech in speeches_a),
+        f"{observer_b}_Retained_Words": sum(len(data_b["coding"][
+            pd.to_numeric(data_b["coding"]["Speech_#"]).astype(int) == speech
+        ]) for speech in speeches_b),
+        f"{observer_a}_Disfluency_Words": total["disfluency_a"],
+        f"{observer_b}_Disfluency_Words": total["disfluency_b"],
+        "Text_Differences": total["alignment_positions"] - total["matched_words"],
+        "Coding_Differences": total["matched_words"] - total["decision_agreements"],
+    }
+    return pd.DataFrame([overall] + results), pd.DataFrame(discrepancies)
+
+
+def build_ioa_results_excel(results_df, discrepancies_df, metadata):
+    buffer = io.BytesIO()
+    with pd.ExcelWriter(buffer, engine="openpyxl") as writer:
+        results_df.to_excel(writer, sheet_name="IOA_Results", index=False)
+        discrepancies_df.to_excel(writer, sheet_name="Discrepancies", index=False)
+        pd.DataFrame([metadata]).to_excel(writer, sheet_name="File_Information", index=False)
+    return buffer.getvalue()
+
+
+def render_ioa_calculator():
+    st.header("Interobserver Agreement Calculator")
+    st.caption(
+        "Upload two IOA-ready coding workbooks. Differences in retained speech "
+        "and disfluency coding are evaluated separately."
+    )
+    col_a, col_b = st.columns(2)
+    with col_a:
+        file_a = st.file_uploader("Observer A coding file", type=["xlsx"], key="ioa_a")
+    with col_b:
+        file_b = st.file_uploader("Observer B coding file", type=["xlsx"], key="ioa_b")
+
+    if not file_a or not file_b:
+        st.info("Upload both coding files to calculate agreement.")
+        return
+
+    try:
+        data_a = read_ioa_workbook(file_a)
+        data_b = read_ioa_workbook(file_b)
+        results_df, discrepancies_df = compare_ioa_workbooks(data_a, data_b)
+    except Exception as error:
+        st.error(f"Unable to compare these files: {error}")
+        return
+
+    observer_a, observer_b = data_a["observer"], data_b["observer"]
+    st.markdown(
+        f"**Participant:** {data_a['participant']} &nbsp;&nbsp; "
+        f"**Observers:** {observer_a} and {observer_b}"
+    )
+    if observer_a == observer_b:
+        st.warning("Both files use the same Observer ID. Confirm that they are independent records.")
+
+    overall = results_df.iloc[0]
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Retained-text agreement", f"{overall['Retained_Text_Agreement_%']:.2f}%")
+    m2.metric("Disfluency decision agreement", f"{overall['Disfluency_Decision_Agreement_%']:.2f}%")
+    m3.metric("Occurrence agreement", f"{overall['Disfluency_Occurrence_Agreement_%']:.2f}%")
+    m4.metric("Total-count agreement", f"{overall['Total_Count_Agreement_%']:.2f}%")
+
+    st.subheader("Agreement Results")
+    st.dataframe(results_df, use_container_width=True, hide_index=True)
+
+    st.subheader("Discrepancies")
+    if discrepancies_df.empty:
+        st.success("No retained-text or coding discrepancies were found.")
+    else:
+        st.dataframe(discrepancies_df, use_container_width=True, hide_index=True)
+
+    with st.expander("How these measures are calculated"):
+        st.markdown(
+            "- **Retained-text agreement:** exactly aligned retained words divided by all aligned positions.\n"
+            "- **Disfluency decision agreement:** matching disfluency/non-disfluency decisions among words retained by both observers.\n"
+            "- **Occurrence agreement:** words coded as disfluent by both observers divided by words coded as disfluent by either observer.\n"
+            "- **Category agreement:** matching lexical/non-lexical categories when both observers coded a word as disfluent.\n"
+            "- **Total-count agreement:** smaller disfluency-word count divided by the larger count."
+        )
+
+    metadata = {
+        "Participant_ID": data_a["participant"],
+        "Observer_A": observer_a,
+        "Observer_B": observer_b,
+        "Observer_A_File": file_a.name,
+        "Observer_B_File": file_b.name,
+    }
+    output = build_ioa_results_excel(results_df, discrepancies_df, metadata)
+    safe_participant = re.sub(r"[^A-Za-z0-9_-]+", "_", data_a["participant"])
+    safe_a = re.sub(r"[^A-Za-z0-9_-]+", "_", observer_a)
+    safe_b = re.sub(r"[^A-Za-z0-9_-]+", "_", observer_b)
+    st.download_button(
+        "📥 Download IOA Results",
+        data=output,
+        file_name=f"IOA_{safe_participant}_{safe_a}_vs_{safe_b}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+
 # --- 1. SIDEBAR ---
+tool_mode = st.sidebar.radio(
+    "Select Tool", ["Speech Disfluency Coding", "IOA Calculator"]
+)
+if tool_mode == "IOA Calculator":
+    render_ioa_calculator()
+    st.stop()
+
 st.sidebar.header("1. Configure Analysis")
 n_input = st.sidebar.text_area("Non-Lexical (N)", value="uh, um, er, ah, mm-hmm, erm, hmm, eh, huh", height=80)
 l_input = st.sidebar.text_area("Lexical (L)", value="like, you know, so, therefore, I mean", height=80)
