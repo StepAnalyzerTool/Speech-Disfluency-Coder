@@ -319,7 +319,7 @@ def compare_ioa_workbooks(data_a, data_b):
         raise ValueError("The files do not contain the same speech numbers.")
 
     observer_a, observer_b = data_a["observer"], data_b["observer"]
-    results, discrepancies, all_counts = [], [], []
+    results, discrepancies = [], []
     for speech_number in sorted(speeches_a):
         rows_a = data_a["coding"][
             pd.to_numeric(data_a["coding"]["Speech_#"]).astype(int) == speech_number
@@ -333,35 +333,7 @@ def compare_ioa_workbooks(data_a, data_b):
         )
         results.append(result)
         discrepancies.extend(speech_discrepancies)
-        all_counts.append(counts)
-
-    total = {
-        key: sum(item[key] for item in all_counts)
-        for key in all_counts[0]
-    }
-    overall = {
-        "Scope": "Overall",
-        "Topic": "All speeches",
-        "Retained_Text_Agreement_%": percent(total["matched_words"], total["alignment_positions"]),
-        "Disfluency_Decision_Agreement_%": percent(total["decision_agreements"], total["matched_words"]),
-        "Disfluency_Occurrence_Agreement_%": percent(total["both_disfluency"], total["either_disfluency"]),
-        "Category_Agreement_%": percent(total["category_agreements"], total["both_coded"]),
-        "Total_Count_Agreement_%": percent(
-            min(total["disfluency_a"], total["disfluency_b"]),
-            max(total["disfluency_a"], total["disfluency_b"]),
-        ),
-        f"{observer_a}_Retained_Words": sum(len(data_a["coding"][
-            pd.to_numeric(data_a["coding"]["Speech_#"]).astype(int) == speech
-        ]) for speech in speeches_a),
-        f"{observer_b}_Retained_Words": sum(len(data_b["coding"][
-            pd.to_numeric(data_b["coding"]["Speech_#"]).astype(int) == speech
-        ]) for speech in speeches_b),
-        f"{observer_a}_Disfluency_Words": total["disfluency_a"],
-        f"{observer_b}_Disfluency_Words": total["disfluency_b"],
-        "Text_Differences": total["alignment_positions"] - total["matched_words"],
-        "Coding_Differences": total["matched_words"] - total["decision_agreements"],
-    }
-    return pd.DataFrame([overall] + results), pd.DataFrame(discrepancies)
+    return pd.DataFrame(results), pd.DataFrame(discrepancies)
 
 
 def build_ioa_results_excel(results_df, discrepancies_df, metadata):
@@ -405,14 +377,7 @@ def render_ioa_calculator():
     if observer_a == observer_b:
         st.warning("Both files use the same Observer ID. Confirm that they are independent records.")
 
-    overall = results_df.iloc[0]
-    m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Retained-text agreement", f"{overall['Retained_Text_Agreement_%']:.2f}%")
-    m2.metric("Disfluency decision agreement", f"{overall['Disfluency_Decision_Agreement_%']:.2f}%")
-    m3.metric("Occurrence agreement", f"{overall['Disfluency_Occurrence_Agreement_%']:.2f}%")
-    m4.metric("Total-count agreement", f"{overall['Total_Count_Agreement_%']:.2f}%")
-
-    st.subheader("Agreement Results")
+    st.subheader("Agreement Results by Speech")
     st.dataframe(results_df, use_container_width=True, hide_index=True)
 
     st.subheader("Discrepancies")
