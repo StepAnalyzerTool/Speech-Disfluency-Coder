@@ -9,7 +9,8 @@ from docx.enum.text import WD_COLOR_INDEX
 
 # --- SETTINGS & UI CONFIG ---
 st.set_page_config(page_title="Disfluency Analyzer", layout="wide")
-st.title("🗣️ Speech Disfluency Analyzer (v1.7)")
+st.title("🗣️ Speech Disfluency Analyzer")
+st.caption("From the CVC Cosmos · Making every word count.")
 
 # --- HELPERS ---
 def get_seconds(time_str):
