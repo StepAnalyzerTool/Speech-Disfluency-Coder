@@ -487,7 +487,16 @@ def analyze_segment(text_block, n_list, l_list, exclude_list):
             word_idx = len(clean_text[:m.start()].split())
             p_ctx = words[max(0, word_idx-1):word_idx]
             n_ctx = words[word_idx+len(target.split()):word_idx+len(target.split())+1]
-            if is_filler_heuristic(target, p_ctx, n_ctx) or target in n_list:
+            # A comma-delimited "like" functions as a discourse marker even when
+            # the neighboring-word heuristic would otherwise treat it as grammatical.
+            left_context = clean_text[:m.start()].rstrip()
+            right_context = clean_text[m.end():].lstrip()
+            comma_delimited_like = (
+                target == "like"
+                and left_context.endswith(",")
+                and right_context.startswith(",")
+            )
+            if comma_delimited_like or is_filler_heuristic(target, p_ctx, n_ctx) or target in n_list:
                 flagged_indices.extend(range(m.start(), m.end()))
                 findings.append({
                     "Word": target, "Category": "Non-Lexical" if target in n_list else "Lexical",
